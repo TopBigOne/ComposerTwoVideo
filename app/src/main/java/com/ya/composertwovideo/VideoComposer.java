@@ -8,7 +8,6 @@ import android.util.Log;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -37,19 +36,18 @@ public class VideoComposer {
     }
 
 
-    public boolean joinVideo() {
-        Log.d(TAG, "joinVideo: ");
+    public boolean startCompose() {
+        Log.d(TAG, "startCompose: ");
 
         if (!setOutputMp4MediaFormatAndStartMuxer()) {
             return false;
         }
-
-        long             ptsOffset = 0L;
-        Iterator<String> tracks    = mVideoPathList.iterator();
-        while (tracks.hasNext()) {
-            String         tempVideoPath  = tracks.next();
-            boolean        hasVideo       = true;
-            boolean        hasAudio       = true;
+        long ptsOffset = 0L;
+        for (String tempVideoPath : mVideoPathList) {
+            Log.i(TAG, "    tempVideoPath:" + tempVideoPath);
+            boolean hasVideo = true;
+            boolean hasAudio = true;
+            // video part.
             MediaExtractor videoExtractor = new MediaExtractor();
             try {
                 videoExtractor.setDataSource(tempVideoPath);
@@ -57,12 +55,14 @@ public class VideoComposer {
                 e.printStackTrace();
             }
 
-            int inVideoTrackIndex = selectTrack(videoExtractor, "video/");
+            int inVideoTrackIndex = selectTrack(videoExtractor, MIME_VIDEO);
             if (inVideoTrackIndex < 0) {
                 hasVideo = false;
             }
             videoExtractor.selectTrack(inVideoTrackIndex);
 
+
+            // audio part.
             MediaExtractor audioExtractor = new MediaExtractor();
             try {
                 audioExtractor.setDataSource(tempVideoPath);
@@ -70,15 +70,19 @@ public class VideoComposer {
                 e.printStackTrace();
             }
 
-            int inAudioTrackIndex = selectTrack(audioExtractor, "audio/");
+            int inAudioTrackIndex = selectTrack(audioExtractor, MIME_AUDIO);
             if (inAudioTrackIndex < 0) {
                 hasAudio = false;
             }
             audioExtractor.selectTrack(inAudioTrackIndex);
+
+
+            // process audio and video part.
             boolean bMediaDone = false;
             long    pts        = 0L;
             long    audioPts   = 0L;
             long    videoPts   = 0L;
+
             while (!bMediaDone) {
                 if (!hasAudio && !hasVideo) {
                     break;
@@ -88,14 +92,13 @@ public class VideoComposer {
                 int            currTrackIndex;
                 MediaExtractor currMediaExtractor;
 
-
                 if (hasAudio && (!hasVideo || audioPts - videoPts <= 50000L)) {
-                    Log.i(TAG, "    process audio");
+                    // Log.i(TAG, "    process audio");
                     currTrackIndex = inAudioTrackIndex;
                     currOutTrackIndex = outputAudioTrackIndex;
                     currMediaExtractor = audioExtractor;
                 } else {
-                    Log.i(TAG, "    process video");
+                    // Log.i(TAG, "    process video");
                     currTrackIndex = inVideoTrackIndex;
                     currOutTrackIndex = outputVideoTrackIndex;
                     currMediaExtractor = videoExtractor;
@@ -110,52 +113,70 @@ public class VideoComposer {
                     } else if (currTrackIndex == inVideoTrackIndex) {
                         hasVideo = false;
                     }
-                } else {
-                    if (currMediaExtractor.getSampleTrackIndex() != currTrackIndex) {
-                        Log.e(TAG, "joinVideo: the currTrackIndex " + currTrackIndex + " is wrong.");
-                    }
-
-                    pts = currMediaExtractor.getSampleTime();
-                    if (currTrackIndex == inVideoTrackIndex) {
-                        videoPts = pts;
-                    } else if (currTrackIndex == inAudioTrackIndex) {
-                        audioPts = pts;
-                    }
-
-                    MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
-                    bufferInfo.offset = 0;
-                    bufferInfo.size = chunkSize;
-                    // pts 需要再次重新做一个计算
-                    bufferInfo.presentationTimeUs = ptsOffset + pts;
-                    if ((currMediaExtractor.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
-                        bufferInfo.flags = MediaCodec.BUFFER_FLAG_KEY_FRAME;
-                    }
-                    mReadBuffer.rewind();
-                    Log.i(TAG, String.format("write sample track %d, size %d, pts %d flag %d", currOutTrackIndex, bufferInfo.size, bufferInfo.presentationTimeUs, bufferInfo.flags));
-
-                    mediaMuxer.writeSampleData(currOutTrackIndex, mReadBuffer, bufferInfo);
-                    currMediaExtractor.advance();
-
+                    continue;
                 }
+
+                if (currMediaExtractor.getSampleTrackIndex() != currTrackIndex) {
+                    Log.e(TAG, "joinVideo: the currTrackIndex " + currTrackIndex + " is wrong.");
+                }
+                // 处理pts
+                pts = currMediaExtractor.getSampleTime();
+                if (currTrackIndex == inVideoTrackIndex) {
+                    videoPts = pts;
+                } else if (currTrackIndex == inAudioTrackIndex) {
+                    audioPts = pts;
+                }
+
+                MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
+                bufferInfo.offset = 0;
+                bufferInfo.size = chunkSize;
+                // pts 需要再次重新做一个计算，这是一个不断累加的过程
+                bufferInfo.presentationTimeUs = ptsOffset + pts;
+                if ((currMediaExtractor.getSampleFlags() & MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+                    bufferInfo.flags = MediaCodec.BUFFER_FLAG_KEY_FRAME;
+                }
+                mReadBuffer.rewind();
+
+                String strBufferInfo = String.format("write sample: \n" +
+                        "       track : %d,\n"+
+                        "       size  : %d,\n"+
+                        "       pts   : %d,\n" +
+                        "       flag  : %d,\n", currOutTrackIndex,
+                        bufferInfo.size,
+                        bufferInfo.presentationTimeUs,
+                        bufferInfo.flags);
+               // Log.i(TAG, "      " + strBufferInfo);
+
+                mediaMuxer.writeSampleData(currOutTrackIndex, mReadBuffer, bufferInfo);
+                // 分离器迈向下一帧
+                currMediaExtractor.advance();
+
             }
+
+            // end the while loop,and then continue the for loop.
             ptsOffset += Math.max(videoPts, audioPts);
             // 前一个文件的最后一帧，和后一个文件的第一帧，差10ms，这是估算值，不准确，但能用
             ptsOffset += 1000L;
             Log.d(TAG, "    ptsOffset : " + ptsOffset);
             videoExtractor.release();
             audioExtractor.release();
-
         }
 
+
+        doRelease();
+
+        Log.i(TAG, "     composer video DONE.");
+        return true;
+
+    }
+
+    private void doRelease() {
+        Log.d(TAG, "doRelease: ");
         if (mediaMuxer != null) {
             mediaMuxer.stop();
             mediaMuxer.release();
             mediaMuxer = null;
         }
-
-        Log.i(TAG, "     video join finished.");
-        return true;
-
     }
 
 

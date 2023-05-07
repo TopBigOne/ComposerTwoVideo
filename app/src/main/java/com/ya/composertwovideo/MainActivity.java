@@ -8,8 +8,6 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.Toast;
 
-import java.io.File;
-import java.nio.file.Files;
 import java.util.ArrayList;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
@@ -38,7 +36,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 Log.i(TAG, "    videoList " + videoList);
 
                 VideoComposer composer = new VideoComposer(videoList, getFilesDir()+"/compose_out.mp4");
-                final boolean result   = composer.joinVideo();
+                final boolean result   = composer.startCompose();
 
                 mButton.post(new Runnable() {
                     @Override
